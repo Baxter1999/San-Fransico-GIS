@@ -1,0 +1,1391 @@
+```{css, echo=FALSE}
+
+title: "Bay Area Airbnb Location Analysis"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=10, fig.height=7) 
+
+library(plyr)
+
+library(tidycensus)
+library(tidyverse)
+options(tigris_use_cache = TRUE)
+census_api_key("2fdaeefbb571fd64aa3b0676a23552177079b667")
+
+library(sf)
+library(vtable)
+library(rgdal)
+library(sp)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(biscale)
+library(cowplot)
+library(osmdata)
+library(ggmap)
+library(fastDummies)
+library(jtools)
+library(kableExtra)
+library(huxtable)
+library(osmdata)
+library(osrm)
+library(ggsn)
+library(patchwork)
+library(ggpmisc)
+library(jsonlite)
+library(rjson)
+library(janitor)
+library(ggspatial)
+library(plotly)
+library(classInt)
+library(ggmap)
+library(downloader)
+library(raster)
+library(tmap)
+
+```
+
+```{css, echo=FALSE}
+h1, h2 {
+  text-align: center;
+}
+
+```
+
+# Introduction #
+
+The San Francisco Bay Area is the fifth most popular tourist destination in the United States (Dodd, 2022). As demand for more informal accommodation rises, more tourists are staying in Airbnb rentals, including in the Bay Area (Amaro et al, 2018). Bay Area Airbnb data provides important insight into the factors that influence traveler’s rental location. Since price is often assumed as variable to demand, one way to analyze accommodation choice is through finding factors that influence price. Baruca and Civre (2012) analyzed hotel decision-making, finding that 31.5% of respondents prioritized location, suggesting safety and proximity to preferred destinations are important factors when choosing accommodation. Thus, I ask: *how does Airbnb location influence price?* To answer my question, I compare 2022 Airbnb data with location safety indicators including crime and poverty variables, and proximity to desired locations including distance to tourist sites and the coast. 
+
+# Part 1 #
+
+## Part 1.1: Collect and Explore Data ##
+
+To conduct my analysis, I downloaded seven datasets identified below. The R Markdown is self-contained within the provided folder, so setting the working directory is not necessary nor does one need to download external data. The data is either downloaded via URL or API or if necessary, provided in R Data Files (RDA) to improve space complexity compared to shapefiles. For example, the crime dataset was so large that downloading the data via the link in R times out and takes over fifteen minutes manually. The landmark and coastal data download with different names each time the data is extracted so I saved them in RDA files for simplicity. 
+
+**Bay Area Airbnb**
+```{r bay area data}
+
+# Bay Area Airbnb
+
+# download and save San Francisco data
+sanfran_url <- "http://data.insideairbnb.com/united-states/ca/san-francisco/2022-09-07/visualisations/listings.csv"
+sanfran <- read.csv(sanfran_url)
+
+# download and save San Mateo data data
+sanmateo_url <- "http://data.insideairbnb.com/united-states/ca/san-mateo-county/2022-09-19/visualisations/listings.csv"
+sanmateo <- read.csv(sanmateo_url)
+
+# download and save Oakland data
+oakland_url <- "http://data.insideairbnb.com/united-states/ca/oakland/2022-09-18/visualisations/listings.csv"
+oakland <- read.csv(oakland_url)
+
+# combine the data
+bay_area <- rbind(sanfran, sanmateo, oakland) 
+
+# remove extra column
+bay_area <- bay_area[,-5]
+
+# delete extra
+rm(oakland,sanfran,sanmateo,sanfran_url,sanmateo_url,oakland_url)
+
+```
+
+**Zip Code**
+```{r zip code data}
+
+# zipcode shapefile 
+url <- "https://spatial.lib.berkeley.edu/public/ark28722-s7888q/data.zip"
+download(url, dest="zipcodes.zip", mode="wb") 
+unzip ("zipcodes.zip", exdir = "./")
+bay_zip <- read_sf("bayarea_zipcodes.shp")
+```
+
+**American Community Survey**
+```{r census data, warning = FALSE, message = FALSE}
+
+# population data
+zip_pop_link <- "https://api.census.gov/data/2020/acs/acs5?get=NAME,B01003_001E&for=zip%20code%20tabulation%20area:*&key=2fdaeefbb571fd64aa3b0676a23552177079b667"
+
+pop_data <- jsonlite::fromJSON(zip_pop_link) # convert to df
+
+pop_data <- janitor::row_to_names(pop_data, 1, remove_rows_above = FALSE) # fix row names
+pop_data <- as.data.frame(pop_data) # save to df
+pop_data <- pop_data[,-1] # remove extra column
+
+
+# poverty data
+zip_poverty_link <- "https://api.census.gov/data/2020/acs/acs5?get=NAME,B17001_002E&for=zip%20code%20tabulation%20area:*&key=2fdaeefbb571fd64aa3b0676a23552177079b667"
+
+poverty_data <- jsonlite::fromJSON(zip_poverty_link) # convert to df
+
+poverty_data <- janitor::row_to_names(poverty_data, 1, remove_rows_above = FALSE) # fix row names
+poverty_data <- as.data.frame(poverty_data) # save to df
+poverty_data <- poverty_data[,-1] # remove extra column
+
+
+# internet data
+zip_internet_link <- "https://api.census.gov/data/2020/acs/acs5?get=NAME,B28011_001E&for=zip%20code%20tabulation%20area:*&key=2fdaeefbb571fd64aa3b0676a23552177079b667"
+
+pop_internet <- jsonlite::fromJSON(zip_internet_link) # convert to df
+
+pop_internet <- janitor::row_to_names(pop_internet, 1, remove_rows_above = FALSE) # fix row names
+pop_internet <- as.data.frame(pop_internet) # save to df
+pop_internet <- pop_internet[,-1] # remove extra column
+
+# combine census data
+census_data <- merge(pop_data,poverty_data,by="zip code tabulation area")
+census_data <- merge(census_data,pop_internet,by="zip code tabulation area")
+
+# rename columns
+census_data <- dplyr::rename(census_data, pop_count = B01003_001E)
+census_data <- dplyr::rename(census_data, poverty_count = B17001_002E)
+census_data <- dplyr::rename(census_data, internet_count = B28011_001E)
+census_data <- dplyr::rename(census_data, zip = 'zip code tabulation area')
+
+# delete extra df
+rm(pop_data,poverty_data,pop_internet,zip_pop_link,zip_poverty_link,zip_internet_link)
+```
+
+**Crime**
+```{r crime data}
+
+# crime shapefile
+load("bay_crime.rda")
+
+```
+
+**Equal Priority Community**
+```{r development data}
+
+# developmental district shapefile
+url <- "https://opendata.arcgis.com/api/v3/datasets/28a03a46fe9c4df0a29746d6f8c633c8_0/downloads/data?format=shp&spatialRefId=4326&where=1%3D1"
+download(url, dest="dev.zip", mode="wb") 
+unzip ("dev.zip", exdir = "./")
+bay_dev <- read_sf("equity_priority_communities_2020_acs2018.shp")
+
+rm(url)
+
+```
+
+**Landmark**
+```{r landmark data}
+
+# Landmark shapefile 
+load("bay_lm.rda")
+
+```
+
+**Coastal**
+```{r coastal data}
+
+# coast shapefile
+load("bay_coast.rda")
+
+```
+
+## Part 1.2: Preparing the Data ##
+
+Next, I prepared the data to ensure appropriate geographic classification. I converted the Airbnb csv into a shapefile and set the CRS appropriately, then converted each other shapefile to the same CRS. I used the ESPG: 7131 CRS, because it is specifically created to represent the Bay Area (EPSG, n.d). 
+
+I intend to work primarily with two combined datasets: bay area and bay points. Bay area represents data per zip code, including ACS data and the geometry is set to the zip codes polygon. Bay points represents the Airbnb points data, with each row representing attributes for each unique Airbnb rental. 
+
+```{r crs, warning = FALSE, results='hide', message = FALSE}
+
+# create a sf object
+bay_area <- st_as_sf(bay_area, coords = c(7, 6)) 
+
+# set the CRS and transform to San Francisco CS13
+bay_area <- st_set_crs(bay_area, 4326) 
+bay_area <- st_transform(bay_area, 7131)
+bay_points <- bay_area
+
+# transform zip crs
+bay_zip <- st_transform(bay_zip, 7131)
+
+# transform crime crs
+bay_crime <- st_transform(bay_crime, 7131)
+
+# transform development crs
+bay_dev <- st_transform(bay_dev, 7131)
+
+# transform landmarks crs
+bay_lm <- st_transform(bay_lm, 7131)
+
+# transform coast crs
+bay_coast <- st_transform(bay_coast, 7131)
+
+```
+
+I saved bay points after I set the Airbnb data CRS and I created bay area by merging the zip code data and census data, via the matching zip code column. Then, I performed a spatial join between the zip code and Airbnb rentals data. 
+
+```{r combine df}
+
+# combine zip + census data
+census_zip <- merge(x=bay_zip, y=census_data, by.x="ZIP", by.y="zip")
+
+# combine census/zip + bay area data
+bay_area <- st_join(census_zip, bay_area)
+
+# delete extra df
+rm(bay_zip,census_data,census_zip)
+```
+
+## Part 1.3: Describe Datasets Used ##
+
+Each dataset is described below: 
+
+**Bay Area Airbnb:** The Airbnb data is composed of over 13,000 rentals in 2022 from the Bay Area. The dataset provides information about the host, the location, and information about each Airbnb such as room type, price, reviews, host listings, and availability. The dataset is provided by Inside Airbnb, which acquires and cleans the data from the Airbnb site (Cox, 2022).  
+Zip Code: The zip code dataset provides the polygon location, area, and perimeter of each of the 187 zip codes in the Bay Area. The data is provided by the Berkley Library and is originally acquired from ESRI (Berkley Library, 2022). 
+
+**American Community Survey:** The ACS dataset provides five-year period sample estimates (2016-2020) of socioeconomic and demographic information for geographies across the United States (Census, 2022). While data is available per census tract, for simplicity I acquired zip code level data from the Bay Area. I chose to analyze (Census, 2022):
+
+**A. Poverty Rate.** The ACS provided the estimated total members of the population per zip code whose incomes were below the poverty level during the past year. To acquire poverty percentage per zip code, I standardized the data by ACS provided population counts. 
+
+**B. Internet subscriptions per household.** The ACS provided the number of internet subscriptions per household in each zip code. The survey did not provide information about the number of households, so I divided the data in half since the average Bay Area household includes two people (Point2, 2022). 
+
+I chose these variables because they helped determine if a location is ‘undesirable’ due to negative associations surrounding poverty. Unfortunately, U.S. poverty measurements inaccurately calculate poverty in high-income areas like the Bay Area. The United States uses the same poverty line threshold across the country, regardless of regional changes of prices (Haider & Schweitzer, 2020). If a family of 4 makes $25,465 or less per year, they are classified as impoverished (Haider & Schweitzer, 2020). However, San Francisco is 55% more expensive than the average U.S. city and the third most expensive city in the United States, which suggests poverty is undercounted in the area (CCER, 2022). Thus, I added a proxy of poverty which is internet subscriptions. Past research has found that internet connection corresponds with reduced poverty because of the cost and the higher necessity for ‘highly-skilled’ workers (e.g., Garcia-Mora & Mora-Rivera, 2021). 
+
+**Crime:** The crime dataset includes all criminal incident reports filed with the police (unless sealed by the courts) and incidents self-reported by the public in the Bay Area from January 1, 2018, to the present. The dataset provides the date, location, and type of incident reported(DataSF, 2022), but no information on convictions.
+
+Historically, crime has had a complicated relationship with locational desirability. While most people try to stay away from violent crime like homicide and assault, crimes like theft could suggest pickpocketing or other crimes aimed at tourists (Biagi & Dettoto, 2012). Additionally, in big cities even if an area is ‘nice’ crime is often still high because of population density. 
+
+**Equal Priority Community:** The Equal Priority Community dataset identifies EPC communities, or Bay Area tracts which are viewed as underserved by the local government (GIS Data Catalog, 2021). A tract is classified as an EPC if the threshold of 3-plus variables below is exceeded: 
+* People of color: (70%+)
+* Low-income households: (28%+)
+* English Proficiency (12%-)
+* Seniors over 75 (8%+)
+* Zero-vehicle households (18%+)
+* Single parent households (18%+)
+* Disability rate (12%+)
+* Rent-burdened households (14%+) 
+The variables are acquired and computed by the local government using ACS data. Since there are serious problems with the U.S. poverty rate, using a range of measurements like EPC tracts better represents depravation. 
+
+**Landmarks:** The landmarks dataset provides the location of each landmark identified by Article 10 of the San Francisco Planning Code (DataSF, 2020). Landmarks are identified as locations with historical, cultural, and/or aesthetic value, including tourist destinations like Liberty Hill and Market Street.
+
+**Coastal:** The coastal dataset provided by the San Francisco government contains the coastline location in the Bay Area (DataSF, 2019). The beach is a popular tourist destination in most U.S. cities, but maybe less so in the Bay Area due to cool year-round temperatures. 
+
+
+To clean the data, I removed price outliers significantly skewing the data. I found the interquartile range (IQR) and removed the outliers identified by the threshold above or below the first and third quartile. 
+
+There were several high outliers I removed. There were no minimum outliers, but I removed the Airbnb which identified its price as $0 because this is likely inaccurate. 
+
+```{r find outliers}
+
+# summarize data
+sum_p <- summary(bay_area$price)
+
+# find IQR
+IQR <- 248 - 98
+
+# Calculate outliers threshold 
+Tmin = 98-(1.5*IQR) 
+Tmax = 248+(1.5*IQR) 
+
+# remove outliers 
+bay_area <- subset(bay_area, price<475.5 & price>0) 
+bay_points <- subset(bay_points, price<475.5 & price>0) 
+
+# remove extra 
+rm(IQR,Tmin,Tmax)
+
+```
+
+Even though the distribution was significantly closer to normal, I still logged the data to prevent undue influence from skewed values. 
+
+```{r log data}
+
+# log the data
+bay_area$log_price <- log(bay_area$price)
+bay_points$log_price <- log(bay_points$price)
+
+```
+
+I then cleaned the data by normalizing the ACS data, by population and household as identified above. 
+
+```{r clean census data}
+
+# household calculations
+bay_area$household <- as.numeric(bay_area$pop_count) / 2
+
+# calculate poverty percentage 
+bay_area$perc_pvty <- as.numeric(bay_area$poverty_count)/as.numeric(bay_area$pop_count) * 100 
+
+# calculate internet percentage 
+bay_area$perc_int <- as.numeric(bay_area$internet_count)/as.numeric(bay_area$household) * 100
+
+```
+
+Finally, I removed the points with likely inaccurate coordinates since they were not in a Bay Area zip code and mapped in the ocean. 
+
+```{r remove extra points}
+
+# find missing values
+bay_points <- subset(bay_points, (id %in% bay_area$id))
+
+```
+
+## Part 1.4: Mapping and Data Visualization ##
+
+In this section, I visualize a series of Bay Area maps showcasing Airbnb and ACS data. 
+
+### 1.4.1 Airbnb in the Bay Area at Neighbourhood Level ###
+
+I grouped Airbnb data by zip code and created a shapefile which used group_by the count the number of Airbnb’s per zip code with details available in the bay_zip table. 
+
+```{r obtain dataframe}
+
+# zip count data
+zip_count <- bay_area %>% 
+    group_by(ZIP) %>% 
+    summarize(count=n())
+
+# summarize results
+sum1 <- summary(zip_count$count)
+
+```
+
+**Map 1.1 Airbnb count.** I used the bay_zip table to create the map.  
+
+Then, I calculated the bins for the map. I created a histogram, and the distribution was quite skewed, so I decided to calculate quantile breaks, meaning each bin includes an equal number of values.
+
+```{r map 1.1 bins}
+
+# find the quantiles breaks
+breaks_qt_map1.1 <- classIntervals(zip_count$count, n = 5, style = "quantile")
+
+# create quantiles
+zip_count <- dplyr::mutate(zip_count, map1.1_breaks = cut(count, breaks_qt_map1.1$brks)) 
+
+```
+
+I used the ggplot package to create the map and customized several features, including the color ramp, bounding box, theme, and added a scalebar. 
+
+```{r map 1.1}
+
+# create bounds box
+bounds <- st_bbox(bay_points)
+
+# plot map 1.2
+map1.1 <- ggplot() +
+
+  # data and fill
+  geom_sf(data = zip_count, size=0.5, inherit.aes = FALSE, aes(fill=map1.1_breaks)) +
+
+  # coordinates
+  coord_sf(xlim = c(bounds$xmin - 3000, bounds$xmax + 3000), ylim = c(bounds$ymin + 500, bounds$ymax - 500, expand=TRUE)) +
+  
+  # color 
+  scale_fill_brewer(palette = "OrRd") +
+  
+  # Labs
+  labs(title = "Map 1.1: Listings Count") +
+  
+  # legend name
+  guides(fill=guide_legend(title="Number of Listings")) +
+  
+  # scale 
+  annotation_scale() +
+  
+  # theme
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.title = element_text(size=10))
+
+
+# remove extra df
+rm(zip_count)
+
+```
+
+**Map 1.2 Airbnb price.** I used group_by again to calculate the mean price per zip code. 
+
+```{r obtain dataframe 2}
+
+# mean price data
+zip_mean <- bay_area %>% 
+    group_by(ZIP) %>% 
+    summarize(mean_price=mean(price))
+
+# summarize results
+sum2 <- summary(zip_mean$mean_price)
+
+# make mean price numberic
+zip_mean$mean_price <- as.numeric(zip_mean$mean_price)
+
+```
+
+I chose to use quantile breaks again because price data remains negatively skewed even after removing outliers and used the same ggplot template. I chose to use price, rather than logged price, because the results are easier to interpret. 
+
+```{r map 1.2 bins}
+
+# find the quantiles breaks
+breaks_qt_map1.2 <- classIntervals(as.numeric(zip_mean$mean_price), n = 5, style = "quantile")
+
+# create quantiles
+zip_mean <- dplyr::mutate(zip_mean, map1.2_breaks = cut(mean_price, breaks_qt_map1.2$brks)) 
+
+```
+
+```{r map 1.2}
+
+# create bounds box
+bounds <- st_bbox(bay_points)
+
+# plot map 1.2
+map1.2 <- ggplot() +
+
+  # data and fill
+  geom_sf(data = zip_mean, size=0.5, inherit.aes = FALSE, aes(fill=map1.2_breaks)) +
+
+  # coordinates
+  coord_sf(xlim = c(bounds$xmin - 3000, bounds$xmax + 3000), ylim = c(bounds$ymin + 500, bounds$ymax - 500, expand=TRUE)) +
+  
+  # color 
+  scale_fill_brewer(palette = "GnBu") +
+  
+  # Labs
+  labs(title = "Map 1.2: Listings Price") +
+  
+  # legend name
+  guides(fill=guide_legend(title="Average Price ($)")) +
+  
+  # scale 
+  annotation_scale() +
+  
+  # theme
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.title = element_text(size=10))
+
+# remove extra df
+rm(zip_mean)
+```
+
+### Map 1.1 & 1.2 ###
+
+**Map 1.1** shows that the highest number of listings are concentrated in the top, left portion of the map where San Francisco, and most of the desirable tourist destinations are located. 
+
+**Map 1.2** shows that the highest prices are in parts of San Francisco and along the coast where the best beaches are located. 
+
+Both maps suggest locational desirability, such as tourist destinations and beaches, influences price. 
+Airbnb data is a form of ‘new spatial data,’ because the data is not intentionally created for geospatial purposes. Rather, Inside Airbnb continuously scrapes and cleans records, which is distinct from traditional time-intensive survey analysis. The Airbnb data is better than new spatial datasets because it provides detailed information about each Airbnb, such as coordinates and Airbnb characteristics. Since Airbnb tends to maintain accurate rental information, errors are minimized. Conversely, some new forms of spatial data track user-IP addresses to find their location which could be inaccurate because of VPN’s or other misdirection services. However, Airbnb data only provides a snapshot of accommodation choices since most people stay in more traditional hotels and Airbnb data is primarily on available in major global cities. 
+
+```{r combine 1 maps, fig.align='center'}
+
+# plot maps together
+p1 <- map1.1 + map1.2
+
+p1 + plot_annotation(
+  title = 'Airbnb Data in the Bay Area',
+  theme = theme(plot.title = element_text(hjust = 0.35))
+)
+
+```
+
+### 1.4.2 Socio-economic Variables from the ACS Data ###
+
+I follow the same process as the previous maps instead using ACS data, mapping the poverty (**Map 2.1**) and internet connection rate (**Map 2.2**) per zip code.
+
+```{r census poverty groupby}
+
+# mean price data
+census_pvty <- bay_area %>% 
+    group_by(ZIP) %>% 
+    summarize(pvty=mean(perc_pvty))
+
+```
+
+```{r map 2.1 bins}
+
+# find the quantiles breaks
+breaks_qt_map2.1 <- classIntervals(census_pvty$pvty, n = 5, style = "quantile")
+
+# create quantiles
+census_pvty <- dplyr::mutate(census_pvty, map2.1_breaks = cut(pvty, breaks_qt_map2.1$brks)) 
+
+```
+
+```{r poverty}
+
+# create bounds box
+bounds <- st_bbox(bay_points)
+
+# plot map 2.1
+map2.1 <- ggplot() +
+
+  # data and fill
+  geom_sf(data = census_pvty, size=0.5, inherit.aes = FALSE, aes(fill=map2.1_breaks)) +
+
+  # coordinates
+  coord_sf(xlim = c(bounds$xmin - 5000, bounds$xmax + 5000), ylim = c(bounds$ymin + 1000, bounds$ymax - 1000, expand=TRUE)) +
+  
+  # color 
+  scale_fill_brewer(palette = "RdPu") +
+  
+  # Labs
+  labs(title = "Map 2.1: Poverty per Zipcode") +
+  
+  # legend name
+  guides(fill=guide_legend(title="Poverty(%)")) +
+  
+  # scale 
+  annotation_scale() +
+  
+  # theme
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.title = element_text(size=10))
+
+```
+
+```{r census internet groupby}
+
+# mean price data
+census_int <- bay_area %>% 
+    group_by(ZIP) %>% 
+    summarize(int=mean(perc_int))
+
+```
+
+```{r map 2.2 bins}
+
+# find the quantiles breaks
+breaks_qt_map2.2 <- classIntervals(census_int$int, n = 5, style = "quantile")
+
+# create quantiles
+census_int <- dplyr::mutate(census_int, map2.2_breaks = cut(int, breaks_qt_map2.2$brks)) 
+
+```
+
+```{r internet population, results='hide', message = FALSE}
+
+# create bounds box
+bounds <- st_bbox(bay_points)
+
+# plot map 2.2
+map2.2 <- ggplot() +
+
+  # data and fill
+  geom_sf(data = census_int, size=0.5, inherit.aes = FALSE, aes(fill=map2.2_breaks)) +
+
+  # coordinates
+  coord_sf(xlim = c(bounds$xmin - 5000, bounds$xmax + 5000), ylim = c(bounds$ymin + 1000, bounds$ymax - 1000, expand=TRUE)) +
+  
+  # color 
+  scale_fill_brewer(palette = "Blues") +
+  
+  # Labs
+  labs(title = "Map 2.2: Internet per Zipcode") +
+  
+  # legend name
+  guides(fill=guide_legend(title="Internet(%)")) +
+  
+  # scale 
+  annotation_scale() +
+  
+  # theme
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.title = element_text(size=10))
+
+```
+
+### Map 2.1 & 2.2 ###
+
+**Map 2.1** shows high-poverty concentration in expensive locations around San Francisco, likely in the areas where poorly paid workers tend to live. 
+
+**Map 2.2** shows most households average at least one internet connection (50%+). Interestingly, some of the higher poverty areas have more internet connections which could be because many people are young and live with roommates who elect not to share Wi-Fi.
+
+Overall, the Bay Area appears fairly well off, with most areas having internet connection and low-poverty rates. Yet, this is likely at least partially explained by the poverty rate poorly identifying Bay Area depravation. My analysis suggests that Airbnb’s likely cluster around the coast where poverty is low, but I know from my earlier research there are more Airbnb listings near higher-poverty San Francisco. 
+
+
+```{r combine 2 maps, fig.align='center'}
+
+# plot maps together
+p2 <- map2.1 + map2.2
+
+p2 + plot_annotation(
+  title = 'Census in the Bay Area',
+  theme = theme(plot.title = element_text(hjust = 0.35))
+)
+
+```
+
+### 1.4.3 Combining Datasets ###
+
+In this section, I combine the Airbnb and census data to analyze price and locations relationship with poverty. **Map 3.1** depicts the location and cost of each Airbnb. **Map 3.2** is a bi-scale map comparing the relationship between Airbnb price and poverty. I used the default bins in **Map 3.1**, because breaks are per-log which is visually simple, and the data is not particularly skewed. In **Map 3.2**, the bi-scale map already provides custom breaks based on each variable’s combined relationship.
+
+```{r point plot}
+
+# plot map 2.2
+map3.1 <- ggplot() +
+
+  # data and fill
+  geom_sf(data = bay_area, aes()) +
+  geom_sf(data = bay_points, size=1, aes(color=log_price)) +
+  
+  # color 
+  scale_color_viridis_b('Logged Price', direction = -1) +
+  
+  # labs 
+  labs(title = "Map 3.1: Logged Airbnb Price, based on Location") +
+  
+  # theme
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.title = element_text(size=10))
+```
+
+```{r census and airbnb}
+
+# percent poverty data
+biscale_data <- bay_area %>% 
+    group_by(ZIP) %>% 
+    summarize(pvty=mean(perc_pvty),
+              mean_price=mean(log_price)) 
+
+```
+
+```{r biscale map, warning = FALSE}
+
+# prepare data
+biscale_data <- bi_class(biscale_data, x = mean_price, y = pvty, style = "quantile", dim = 3)
+
+# create bounds box
+bounds <- st_bbox(bay_points)
+
+# map
+biscale_map <- ggplot() +
+  
+  # data
+  geom_sf(data = biscale_data, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  
+  # color 
+  bi_scale_fill(pal = "GrPink", dim = 3) +
+  
+  # coordinates
+  coord_sf(xlim = c(bounds$xmin - 5000, bounds$xmax + 5000), ylim = c(bounds$ymin + 1000, bounds$ymax - 1000, expand=TRUE)) +
+  
+  # Labs
+  labs(title = "Map 3.2: Logged Airbnb Price vs Poverty Rate") +
+  
+  # scale 
+  annotation_scale() +
+  
+  # theme
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.title = element_text(size=10))
+
+# legend
+legend <- bi_legend(pal = "GrPink",
+                    dim = 3,
+                    xlab = "Higher Airbnb $ ",
+                    ylab = "Higher Poverty %",
+                    size = 6)
+
+# final layout
+map3.2 <- ggdraw() +
+ draw_plot(biscale_map, 0, 0, 1, 1.06) +
+ draw_plot(legend, -0.06, 0.06, 0.32, 0.32)
+
+# remove extra
+#rm(biscale_data,biscale_map,legend)
+
+```
+
+### Map 3.1 & 3.2 ###
+
+**Map 3.1** shows the concentration of Airbnb’s by price. Most of them are near San Francisco and along to coast. Price appears to be variable in each area, likely depending on room type, such as single room or entire apartment. 
+
+**Map 3.2** is a bi-scale map which provides lighter colors for high price and poverty and conversely darker colors. Zip codes that are blue are higher poverty and lower prices and zip codes that are red are higher prices and lower poverty. Unsurprisingly, most zip codes are blue (low cost, high poverty) and red (high cost, low poverty), which suggests that travelers choose Airbnb’s based on locational safety and desirability. 
+
+```{r combine 3 maps}
+
+# plot maps together
+p3 <- map3.1 + map3.2
+
+p3 + plot_annotation(
+  title = 'Airbnb Price & Bay Poverty',
+  theme = theme(plot.title = element_text(hjust = 0.4))
+)
+
+```
+
+
+# Part 2 #
+
+## Part 2.1: Discuss Raster Data ##
+
+One way of expanding my analysis is via raster data which is digital imagery, such as satellite imagery. Raster data could identify the exact type of land data, including lakes, urban centers, or farms. This is especially useful in the Bay Area because many people travel to national parks, wine-growing farms, and the center of cities like Berkely and San Francisco. Using land-type raster data, I could analyze land type and usage. For example, I could find a cluster of mansions and identify if Airbnb’s near the area are expensive or identify proximity to each national park, since it is not all available via OpenStreetMap. 
+
+## Part 2.2: Query OpenStreetMap Data ##
+
+In this section, I query OpenStreetMap (OSM) to find the location of prisons in the Bay Area. 
+
+### Part 2.1.1: Query Prisons ###
+
+I decide to query Bay Area prisons because prisons are often far away from tourist destinations and most prefer accommodation away from prisons. 
+
+```{r OSM data, results='hide'}
+
+# collect prison data 
+q <- getbb("Bay Area") %>%
+      opq() %>%
+       add_osm_feature("amenity", "prison")
+
+str(q)
+
+prison <- osmdata_sf(q)
+
+# remove extra
+rm(q)
+```
+
+```{r extract long/lat}
+
+# find the latitude and longitude for each prison
+prison_coords <- prison$osm_points %>% 
+  sf::st_coordinates() %>% 
+  as.data.frame() %>% 
+  dplyr::select(X,Y) %>% 
+  dplyr::rename(long = X, lat = Y)
+
+```
+
+### Map 4 Heatmap ###
+
+**Map 4** is shown below. The distribution of prisons appears to concentrate in the center of the Bay Area, near San Francisco. 
+
+```{r create heatmap, message = FALSE, warning = FALSE, results='hide'}
+
+# add background map 
+ba_map <- get_map(getbb("Bay Area"), maptype = "toner-background", source = "stamen")
+ba_map <- ggmap(ba_map, extent="device", legend="none")
+
+# create map 4
+map4 <- ba_map + 
+  
+  # data
+  geom_density_2d_filled(data=prison_coords, aes(x=long, y=lat, fill=..level.., alpha=..level..), geom="polygon") +
+  
+  # Labs
+  labs(title = "Map 4: Heat Map of Bay Area Prisons") 
+
+```
+
+```{r map 4}
+map4
+
+# remove extra
+rm(ba_map)
+
+```
+
+### Part 2.1.2: Create Buffers ###
+
+To analyze Airbnb proximity to prisons, I created buffers identifying if and how many prisons are within a 200-meter radius of each Airbnb. I intersected Airbnb’s with buffers with OSM prison data, then used group_by to count the number of prisons near each Airbnb, replacing null values with 0 and appending the results to bay points. More detailed results are available in the bay_prison_count table. 
+
+There are 39 Airbnb’s within 200 meters of Bay Area prisons. Originally, I thought that I would not want to stay close to a prison, not because of safety concerns, but because they are typically ugly, and distanced from tourist sites. However, since the prisons are concentrated closer to San Francisco, I likely would stay near one. 
+
+```{r create buffers, message = FALSE, warning = FALSE}
+
+# create prisons df
+prison_df = prison$osm_points
+
+# transform crs
+prison_df <- st_transform(prison_df, 7131)
+
+# create 200m buffer around airbnb
+buffers200m <- st_buffer(bay_points, dist=200)
+
+# attach distance
+buffers200m$area_buffer <- st_area(buffers200m)
+
+# find intersection
+buffers_inter_prisons <- st_intersection(buffers200m, prison_df)
+
+# count airbnbs within 200m of prisons
+bay_prison_count <- buffers_inter_prisons %>% 
+    group_by(id) %>% 
+    summarize(prison_count=n())
+
+# append to Aibnb points for later use and fill in na with 0
+bay_prison_count <- data.frame(bay_prison_count$id, bay_prison_count$prison_count)
+bay_points <- merge(x=bay_points, y=bay_prison_count, by.x="id", by.y="bay_prison_count.id", all = TRUE)
+bay_points <- bay_points %>% 
+            mutate(bay_prison_count.prison_count = coalesce(bay_prison_count.prison_count, 0))
+
+# remove extra
+rm(bay_prison_count, buffers_inter_prison)
+
+```
+
+## Part 2.3: Descriptive Data Analysis: Spatial Variable Relationships ##
+
+In this section, I am using data analysis to analyze relevant spatial variable relations. Specifically, I am using plot visualizations and linear regression to study the factors that influence Airbnb price. In addition to Airbnb specific control variables such as type of Airbnb (hotel, apartment, room), number of reviews, number of listings, I include measurements of locational desirability discussed below. 
+
+**Variable 1: Crime.** 
+
+The first socioeconomic variable that I analyze is crime. I selected the data from 2021 because last year’s crime reports are more likely to impact traveler since they are more publicized than newer information. I segmented the data into assault to study if violent crime reduces cost and into theft to analyze whether theft is targeting tourists and closer to high-cost Airbnb’s. 
+
+After segmenting the data, I used a similar buffering process as the prison buffers, keeping my buffer at 200 meters and counting the number of assaults and thefts near each Airbnb. 
+
+```{r crime buffers, message = FALSE}
+
+# bay crime type count table
+bay_crime_type <- bay_crime %>% 
+    group_by(incident_2) %>% 
+    summarize(crime_count=n()) %>% 
+    arrange(desc(crime_count))
+
+```
+
+```{r crime data buffers, message = FALSE, warning = FALSE}
+
+# reduce bay_crime for efficiency purposes 
+bay_crime_2021 <- bay_crime[grep("2021", bay_crime$date_incid),]
+bay_crime_2021_assault <- bay_crime_2021[grep("Assault", bay_crime_2021$incident_2),]
+bay_crime_2021_theft <- bay_crime_2021[grep("Larceny Theft", bay_crime_2021$incident_2),]
+
+# create 200m buffer around airbnb
+buffers200m <- st_buffer(bay_points, dist=200)
+
+# attach distance
+buffers200m$area_buffer <- st_area(buffers200m)
+
+# find interaction
+buffers_inter_2021_assault <- st_intersection(buffers200m, bay_crime_2021_assault)
+buffers_inter_2021_theft <- st_intersection(buffers200m, bay_crime_2021_theft)
+
+# count crimes near each airbnb
+bay_crime_count_21a <- buffers_inter_2021_assault %>% 
+    group_by(id) %>% 
+    summarize(crime_count=n())
+bay_crime_count_21t <- buffers_inter_2021_theft %>% 
+    group_by(id) %>% 
+    summarize(crime_count=n())
+
+# combine with bay_area
+bay_crime_count_21a <- data.frame(bay_crime_count_21a$id, bay_crime_count_21a$crime_count)
+bay_crime_count_21t <- data.frame(bay_crime_count_21t$id, bay_crime_count_21t$crime_count)
+
+bay_points <- merge(x=bay_points, y=bay_crime_count_21a, by.x="id", by.y="bay_crime_count_21a.id", all = TRUE)
+bay_points <- merge(x=bay_points, y=bay_crime_count_21t, by.x="id", by.y="bay_crime_count_21t.id", all = TRUE)
+
+# replace na with 0 for crime count 
+bay_points <- bay_points %>% 
+            mutate(bay_crime_count_21a.crime_count = coalesce(bay_crime_count_21a.crime_count, 0))
+bay_points <- bay_points %>% 
+            mutate(bay_crime_count_21t.crime_count = coalesce(bay_crime_count_21t.crime_count, 0))
+
+# remove extra
+rm(bay_crime_2021, bay_crime_2021_assault, bay_crime_2021_theft, buffers200m, buffers_inter_2021_assault,
+   buffers_inter_2021_theft, bay_crime_count_21a, bay_crime_count_21t)
+
+```
+
+### Plot 1.1 & 1.2 ###
+
+**Plots 1.1** and **1.2** show the distribution of Airbnb’s by logged price compared to assault and theft count. The scatterplots are fairly similar for both crimes, and it appears for Airbnb’s near few crimes price is extremely variable, but when crime increases so does price. While this seems counterintuitive to conventional thinking, high-crime areas could suggest densely populated urban centers like downtown San Francisco. 
+
+```{r crime data visualizations, warning = FALSE}
+
+# crime vs price
+crime_a <- ggplot(bay_points, aes(x=bay_crime_count_21a.crime_count, y=log_price)) + 
+  geom_point() +
+    theme_minimal() +
+    labs(title = 'Plot 1.1: Assault') +
+    xlab("assault crime count") +
+    ylab('logged price')
+
+# crime vs price
+crime_t <- ggplot(bay_points, aes(x=bay_crime_count_21t.crime_count, y=log_price)) + 
+  geom_point() +
+    theme_minimal() +
+    labs(title = "Plot 1.2 Theft") +
+    xlab("theft crime count") +
+    ylab('logged price')
+
+# plot together
+cmap <- crime_a + crime_t
+
+cmap + plot_annotation(
+  title = "Crime's Impact on Airbnb Prices, Bay Area",
+  theme = theme(plot.title = element_text(hjust = 0.4))
+)
+
+
+```
+
+**Variable 2: Equal Priority Communities.**
+
+To study whether Airbnb location in an underserved community lower price, I created a dummy variable for each Airbnb within an EPC. I created a variable indicating whether a location was an EPC, filtered the data by EPC’s, used a spatial join to find Airbnb points in an EPC, then appended the EPC classification to bay points. I replaced non-EPC values with ‘non-epc’ and EPC’s with ‘epc’. 
+
+```{r dev data}
+
+# create variable indicating epc
+bay_dev$epc <- bay_dev$epc_2035 + bay_dev$epc_2040 + bay_dev$epc_2050
+
+# join bay points and epc data
+bay_points_dev <- st_join(bay_dev,bay_points)
+
+# filter non-epc points
+bay_points_dev <- filter(bay_points_dev, epc > 0)
+
+# create df
+bay_epc <- data.frame(bay_points_dev$id, bay_points_dev$epc)
+
+# merge bay points & epc data
+bay_points <- merge(x=bay_points, y=bay_epc, by.x="id", by.y="bay_points_dev.id", all = TRUE)
+
+# replace na with 0
+bay_points <- bay_points %>% 
+            mutate(bay_points_dev.epc = coalesce(bay_points_dev.epc, 0))
+
+# replace variables over 1 with epc, creating dummy variable
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_points_dev.epc = replace(bay_points_dev.epc,bay_points_dev.epc == 1, 'epc'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_points_dev.epc = replace(bay_points_dev.epc,bay_points_dev.epc == 2, 'epc'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_points_dev.epc = replace(bay_points_dev.epc,bay_points_dev.epc == 3, 'epc'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_points_dev.epc = replace(bay_points_dev.epc,bay_points_dev.epc == 0, 'non-epc'))
+
+# remove extra
+rm(bay_dev, bay_points_dev, bay_epc)
+
+```
+
+### Plot 2.1 & 2.2 ###
+
+**Plots 2.1** and **2.2** visualize the relationship between Airbnb prices and EPCs. In Plot 2.1, the point distribution is fairly similar, but EPCs appear to have several additional low-price Airbnb’s. Of course, this analysis is limited because some areas in an EPC might not fit the EPC criteria classifications. Additionally, Plot 2.2 shows the density distribution of EPC’s vs non-EPCs, and the density of non-EPC’s appears to center towards higher prices. 
+
+```{r dev data dummy, warning = FALSE}
+
+# binary scatter plot
+epc1 <- ggplot(data = bay_points) + 
+  geom_jitter(aes(x = log_price, y = bay_points_dev.epc), width=0.05, height=0.1, alpha=0.5) +
+  theme_minimal() +
+    labs(title = "Plot 2.1") +
+    xlab("logged price") +
+    ylab("area type")
+
+# density plot
+epc2 <- ggplot(bay_points) + 
+  geom_density(aes(x = log_price, fill = bay_points_dev.epc), alpha=0.25) +
+  theme_minimal() +
+    labs(title = "Plot 2.2") +
+    xlab("logged price") +
+  scale_fill_discrete(name = "Location")
+
+# plot together
+epc_map <- epc1 + epc2
+
+epc_map + plot_annotation(
+  title = "Equal Priority Communities",
+  theme = theme(plot.title = element_text(hjust = 0.4))
+)
+```
+
+**Variable 3: Landmarks and tourist destinations.** 
+
+I next analyzed if closeness to landmarks and tourist destinations, such as the Golden Gate Bridge, Alcatraz Island, and Chinatown, increase Airbnb price. I created 16,000-meter buffer around each Airbnb and summed the count of landmarks within each Airbnb’s buffer. Then, I used OSM to find the location of the Golden Gate Bridge, Alcatraz Island, and Chinatown and the same buffer to determine if an Airbnb was close to one of these major tourist destinations. I then created dummy variables indicating if each tourist destination was nearby. 
+
+```{r landmark distance, warning = FALSE}
+
+# create 5mile (16000m) buffer around airbnb
+buffers5mi <- st_buffer(bay_points, dist=16000)
+
+# attach distance
+buffers5mi$area_buffer <- st_area(buffers5mi)
+
+# find interaction
+buffers_inter_lm <- st_intersection(buffers5mi, bay_lm)
+
+# count landmarks near each airbnb
+bay_lm_count <- buffers_inter_lm %>% 
+    group_by(id) %>% 
+    summarize(lm_count=n())
+
+# combine with bay_area
+bay_lm_count <- data.frame(bay_lm_count$id, bay_lm_count$lm_count)
+bay_points <- merge(x=bay_points, y=bay_lm_count, by.x="id", by.y="bay_lm_count.id", all = TRUE)
+
+# replace na with 0 for landmark count 
+bay_points <- bay_points %>% 
+            mutate(bay_lm_count.lm_count = coalesce(bay_lm_count.lm_count, 0))
+
+# remove extra
+rm(buffers_inter_lm, bay_lm_count)
+
+```
+
+```{r tourist destinations, warning = FALSE}
+
+# Golden Gate Bridge
+ggb <- opq("Bay Area") %>%
+    add_osm_feature(key = "name", value = "Golden Gate Bridge") %>%
+  osmdata_sf()
+
+ggb_df <- ggb$osm_points
+ggb_df <- st_transform(ggb_df, 7131)
+
+# Alcatraz Island
+ac <- opq("Bay Area") %>%
+    add_osm_feature(key = "name", value = "Alcatraz Island") %>%
+  osmdata_sf()
+
+ac_df <- ac$osm_points
+ac_df <- st_transform(ac_df, 7131)
+
+# Chinatown
+ct <- opq("Bay Area") %>%
+    add_osm_feature(key = "name", value = "Chinatown") %>%
+  osmdata_sf()
+
+ct_df <- ct$osm_points
+ct_df <- st_transform(ct_df, 7131)
+
+# remove extra
+rm(ggb, ac, ct)
+
+```
+
+```{r tourist destination buffers, warning = FALSE}
+
+# find interaction
+buffers_inter_ggb <- st_intersection(buffers5mi, ggb_df)
+buffers_inter_ac <- st_intersection(buffers5mi, ac_df)
+buffers_inter_ct <- st_intersection(buffers5mi, ct_df)
+
+# count landmarks near each airbnb
+bay_ggb <- buffers_inter_ggb %>% 
+    group_by(id) %>% 
+    summarize(ggb_count=n())
+bay_ac <- buffers_inter_ac %>% 
+    group_by(id) %>% 
+    summarize(ac_count=n())
+bay_ct <- buffers_inter_ct %>% 
+    group_by(id) %>% 
+    summarize(ct_count=n())
+
+# combine with bay_area
+bay_ggb <- data.frame(bay_ggb$id, bay_ggb$ggb_count)
+bay_points <- merge(x=bay_points, y=bay_ggb, by.x="id", by.y="bay_ggb.id", all = TRUE)
+
+bay_ac <- data.frame(bay_ac$id, bay_ac$ac_count)
+bay_points <- merge(x=bay_points, y=bay_ac, by.x="id", by.y="bay_ac.id", all = TRUE)
+
+bay_ct <- data.frame(bay_ct$id, bay_ct$ct_count)
+bay_points <- merge(x=bay_points, y=bay_ct, by.x="id", by.y="bay_ct.id", all = TRUE)
+
+# replace na with 0 for landmark count 
+bay_points <- bay_points %>% 
+            mutate(bay_ggb.ggb_count = coalesce(bay_ggb.ggb_count, 0))
+bay_points <- bay_points %>% 
+            mutate(bay_ac.ac_count = coalesce(bay_ac.ac_count, 0))
+bay_points <- bay_points %>% 
+            mutate(bay_ct.ct_count = coalesce(bay_ct.ct_count, 0))
+
+# remove extra
+rm(buffers5mi, ggb_df, ac_df, ct_df, buffers_inter_ggb, buffers_inter_ac, buffers_inter_ct,
+   bay_ggb, bay_ac, bay_ct)
+
+```
+
+```{r clean data}
+
+# ggb
+bay_points$bay_ggb.ggb_count <- ifelse(bay_points$bay_ggb.ggb_count > 1, 1, bay_points$bay_ggb.ggb_count)
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_ggb.ggb_count = replace(bay_ggb.ggb_count,bay_ggb.ggb_count == 1, 'Golden-Gate Bridge'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_ggb.ggb_count = replace(bay_ggb.ggb_count,bay_ggb.ggb_count == 0, 'Not Close'))
+
+# ac
+bay_points$bay_ac.ac_count <- ifelse(bay_points$bay_ac.ac_count > 1, 1, bay_points$bay_ac.ac_count)
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_ac.ac_count = replace(bay_ac.ac_count,bay_ac.ac_count == 1, 'Alcatraz Island'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_ac.ac_count = replace(bay_ac.ac_count,bay_ac.ac_count == 0, 'Not Close'))
+
+# ct
+bay_points$bay_ct.ct_count <- ifelse(bay_points$bay_ct.ct_count > 1, 1, bay_points$bay_ct.ct_count)
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_ct.ct_count = replace(bay_ct.ct_count,bay_ct.ct_count == 1, 'Chinatown'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_ct.ct_count = replace(bay_ct.ct_count,bay_ct.ct_count == 0, 'Not Close'))
+
+```
+
+### Plot 3 ###
+
+**Plot 3.1** shows whether landmark proximity influences Airbnb price. It appears that most Airbnb’s near landmarks have a higher cost, but the distribution is variable depending on the number of close landmarks. Surprisingly, in **Plot 3.2**, **Plot 3.3**, and **Plot 3.4**, it appears that closeness to each tourist destination corresponds with lower prices. 
+
+```{r landmark visualizations}
+
+# jitter plot
+lma_1 <- ggplot(data = bay_points) + 
+  geom_jitter(aes(x = log_price, y = bay_lm_count.lm_count), width=0.05, height=0.1, alpha=0.5) +
+  theme_minimal() +
+    labs(title = "Plot 3.1") +
+    xlab("logged price") +
+    ylab("Landmarks")
+
+# jitter plot
+lma_2 <- ggplot(data = bay_points) + 
+  geom_jitter(aes(x = log_price, y = bay_ggb.ggb_count), width=0.05, height=0.1, alpha=0.5) +
+  theme_minimal() +
+    labs(title = "Plot 3.2") +
+    xlab("logged price") +
+    ylab("proximity")
+
+# jitter plot
+lma_3 <- ggplot(data = bay_points) + 
+  geom_jitter(aes(x = log_price, y = bay_ac.ac_count), width=0.05, height=0.1, alpha=0.5) +
+  theme_minimal() +
+    labs(title = "Plot 3.3") +
+    xlab("logged price") +
+    ylab("proximity")
+
+# jitter plot
+lma_4 <- ggplot(data = bay_points) + 
+  geom_jitter(aes(x = log_price, y = bay_ct.ct_count), width=0.05, height=0.1, alpha=0.5) +
+  theme_minimal() +
+    labs(title = "Plot 3.4") +
+    xlab("logged price") +
+    ylab("proximity")
+
+```
+
+```{r lm plots, warning = FALSE}
+# plot together
+lm_map <- lma_1 + lma_2 + lma_3 + lma_4
+
+lm_map + plot_annotation(
+  title = "Proximity to Tourist Destinations",
+  theme = theme(plot.title = element_text(hjust = 0.4))
+)
+```
+
+**Variable 4: Bay Area coast.** 
+
+Finally, I analyzed if close proximity to the coast influences Airbnb price. Since the shapefile provides the geometry of the areas close to the coast, I just created a buffer of 1 meter and analyzed whether Airbnb’s fell inside the range via creating a dummy variable. 
+
+
+```{r coast, distance, warning = FALSE}
+
+# create 1 buffer around airbnb (it tests within coast)
+buffers1m <- st_buffer(bay_points, dist=1)
+
+# attach distance
+buffers1m$area_buffer <- st_area(buffers1m)
+
+# find interaction
+buffers_inter_co <- st_intersection(buffers1m, bay_coast)
+
+# count crimes near each airbnb
+bay_co_count <- buffers_inter_co %>% 
+    group_by(id) %>% 
+    summarize(co_count=n())
+
+# combine with bay_area
+bay_co_count <- data.frame(bay_co_count$id, bay_co_count$co_count)
+bay_points <- merge(x=bay_points, y=bay_co_count, by.x="id", by.y="bay_co_count.id", all = TRUE)
+
+# replace na with 0 for crime count 
+bay_points <- bay_points %>% 
+            mutate(bay_co_count.co_count = coalesce(bay_co_count.co_count, 0))
+
+# convert coast variable to dummy
+bay_points$bay_co_count.co_count <- ifelse(bay_points$bay_co_count.co_count > 1, 1, bay_points$bay_co_count.co_count)
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_co_count.co_count = replace(bay_co_count.co_count,bay_co_count.co_count == 1, 'coast'))
+bay_points <- bay_points %>%
+            dplyr::mutate(bay_co_count.co_count = replace(bay_co_count.co_count,bay_co_count.co_count == 0, 'non-coast'))
+
+# remove extra
+rm(buffers1m, buffers_inter_co, bay_coast, bay_co_count)
+
+```
+
+### Plot 4.1 & 4.2 ###
+
+In plots **4.1** and **4.2**, I visualize the relationship between Airbnb’s near the coast and price. In **Plot 4.1**, the points along the coast appear to have significantly higher coasts. The same relationship appears true in **Plot 4.2**, where the density of non-coastal points shifts towards the lower end of price. 
+
+```{r coast data dummy, warning = FALSE}
+
+# binary scatter plot
+co1 <- ggplot(data = bay_points) + 
+  geom_jitter(aes(x = log_price, y = bay_co_count.co_count), width=0.05, height=0.1, alpha=0.5) +
+  theme_minimal() +
+    labs(title = "Plot 4.1") +
+    xlab("logged price") +
+    ylab("area type")
+
+# density plot
+co2 <- ggplot(bay_points) + 
+  geom_density(aes(x = log_price, fill = bay_co_count.co_count), alpha=0.25) +
+  theme_minimal() +
+    labs(title = "Plot 4.2") +
+    xlab("logged price") +
+  scale_fill_discrete(name = "Location")
+
+# plot together
+co_map <- co1 + co2
+
+co_map + plot_annotation(
+  title = "Proximity to Coast",
+  theme = theme(plot.title = element_text(hjust = 0.4))
+)
+```
+
+### Regression Model 1 ###
+
+To analyze each variable’s relationship with price, I ran two regression models. **Model 1** included control variables: minimum number of nights required stay, number of total reviews and per month, listings count, and room type, and explained 36% of the variation in price. 
+
+```{r variable relationships data}
+
+# rename row names
+bay_points$room_type[bay_points$room_type == 'Entire home/apt'] <- 'entire_home'
+bay_points$room_type[bay_points$room_type == 'Hotel room'] <- 'hotel_room'
+bay_points$room_type[bay_points$room_type == 'Private room'] <- 'private_room'
+bay_points$room_type[bay_points$room_type == 'Shared room'] <- 'shared_room'
+
+# create room type dummy variables
+bay_points <- dummy_cols(bay_points, select_columns = 'room_type')
+
+```
+
+```{r regression model 1}
+
+# model 1
+reg1 <- lm(log_price~minimum_nights + reviews_per_month + number_of_reviews + calculated_host_listings_count + 
+            room_type_hotel_room + room_type_private_room + room_type_shared_room, data=bay_points)
+
+names = c('Minimum Nights' = 'minimum_nights', 'Reviews #, per month' = 'reviews_per_month', 'Total Reviews #' = 'number_of_reviews',
+           'Listings Count' = 'calculated_host_listings_count', 'Room Type: Hotel' = 'room_type_hotel_room', 'Room Type: Private' = 'room_type_private_room',
+           'Room Type: Shared' = 'room_type_shared_room')
+
+# export regression table
+reg_model1 <- export_summs(reg1, scale = TRUE, coefs = names)
+
+```
+
+In **Model 2**, I included the prisons, crime, EPC, landmark and tourist destination, and coast variable specifications identified above. The equation is below:
+
+```{r regression model 2}
+
+# model 2
+reg2 <- lm(log_price~minimum_nights + reviews_per_month + number_of_reviews + calculated_host_listings_count + 
+            room_type_hotel_room + room_type_private_room + room_type_shared_room + bay_prison_count.prison_count + bay_crime_count_21a.crime_count 
+           + bay_crime_count_21t.crime_count + bay_points_dev.epc + bay_co_count.co_count + bay_ggb.ggb_count + bay_ac.ac_count + bay_ct.ct_count, data=bay_points)
+
+names = c('Minimum Nights' = 'minimum_nights', 'Reviews #, per month' = 'reviews_per_month', 'Total Reviews #' = 'number_of_reviews',
+           'Listings Count' = 'calculated_host_listings_count', 'Room Type: Hotel' = 'room_type_hotel_room', 'Room Type: Private' = 'room_type_private_room',
+           'Room Type: Shared' = 'room_type_shared_room', 'Prison Proximity' = 'bay_prison_count.prison_count', 
+          'Crime: Assault' = 'bay_crime_count_21a.crime_count', 'Crime: Theft' = 'bay_crime_count_21t.crime_count', 
+           'Non-EPC' = 'bay_points_dev.epcnon-epc', 'Not Near Coast' = 'bay_co_count.co_countnon-coast', 
+           'Not Near Golden Gate Bridge' = 'bay_ggb.ggb_countNot Close',  'Not Near Alcatraz Island' = 'bay_ac.ac_countNot Close',
+           'Not Near Chinatown' = 'bay_ct.ct_countNot Close')
+
+# export regression table
+reg_model2 <- export_summs(reg1, reg2, scale = TRUE, coefs = names)
+reg_model2
+```
+```{r residual plot}
+
+# remove any na-columns not included in the data
+bay_points <- bay_points %>%
+  filter_at(vars(minimum_nights, reviews_per_month, number_of_reviews, calculated_host_listings_count, room_type_hotel_room, room_type_private_room,
+                 room_type_shared_room, bay_prison_count.prison_count, bay_crime_count_21a.crime_count, bay_crime_count_21t.crime_count, 
+                 bay_points_dev.epc, bay_co_count.co_count), all_vars(!is.na(.)))
+
+# add residual column
+bay_points$residuals <- resid(reg2)
+
+```
+
+**Model 2** explained 40% of the variation in price. Of the significant variables, assault reduced and theft increased price. EPC’s and proximity to Chinatown reduced price. Alternatively, closeness to the Golden Gate Bridge and Alcatraz Island increased price. While plots provide import visual insight, regression helps control for additional factors which yield better explanatory results.
+
+Finally, I created interactive **Map 5** identifying each Airbnb by its second regression model residuals. This helps visualize regression fit and determine if certain locations are poorly explained by the model. I used the default bins because they show clean breaks (i.e, -1 to 1) and allow easy identification for model outliers. 
+
+```{r residual map, message = FALSE, warning = FALSE}
+
+# convert to sf object
+bay_points <- st_sf(bay_points)
+
+# map 5
+tmap_mode("view")
+tm_shape(bay_area) +
+  tm_polygons() +
+  tm_shape(bay_points) + 
+  tm_dots("residuals") +
+  tm_layout(title= "Map 5: Bay Area Airbnb Residuals") +
+  tm_scale_bar(position=c("left", "bottom"))
+```
+
+The residuals were mostly in the -1 to 1 range, suggesting a fairly good model. 
+
+These results can help researchers further analyze locational importance for Bay Area Airbnb’s. While more traditional socioeconomic measurements are often used, EPC data and furthering the analysis with more advanced distance measurements could provide academic insight into location’s influence on price. Additionally, The Bay Area relies on tourists economically so city decision-makers should market EPC’s as desirable locations to stay to bolster their tourist economy. 
+
+# Conclusion #
+
+To find location’s influence on Bay Area Airbnb price, I analyzed locational desirability variables, including Airbnb proximity to reported assaults and thefts, whether a community is underserved, and proximity to landmarks, tourist destinations, and beaches. While I found that some of my map visualizations and plots could appear misleading, controlling for other variables in regression yielded results grounded in theory. The appearance of ‘unsafe’ Airbnb’s with high nearby homicide counts and located in impoverished community’s lower price. While landmarks, the Golden Gate Bridge, and Alcatraz Island all increased Airbnb price. 
+
+# Work Cited #
+
+Dodd, Carly. (2021). “America's 10 Most Visited Cities,” *World Atlas*. Accessed from: https://www.worldatlas.com/cities/america-s-10-most-visited-cities.html#h_66153777212601632395760926.
+
+Amaro, Suzanne. (2019). “Millenials’ intentions to book on Airbnb,” *Current Issues in Tourism*, 22(18): 2284-2298. DOI: 10.1080/13683500.2018.1448368. 
+
+Baruca, Petra Zabukovec & Žana Čivre. (2012). “How do guests choose a hotel?,” *Academica Turistica*, 5(1): 75-84. 
+
+ESPG. (No Date). “EPSG:7131.” Accessed from: https://epsg.io/7131. 
+
+Cox, Murray. (2022). “Get the Data,” *Inside Airbnb*. Accessed from: http://insideairbnb.com/get-the-data. 
+
+Berkeley Library. (2004). “Bay Area ZIP Code Areas”. Accessed from: https://geodata.lib.berkeley.edu/catalog/ark28722-s7888q. 
+
+United States Census Bureau. (2022a). “American Community Survey 5-Year Data (2009-2021).” Accessed from: https://www.census.gov/data/developers/data-sets/acs-5year.html. 
+
+United States Census Bureau. (2022b). “Census Data API: Variables in /data/2020/acs/acs5/variables.” Accessed from: https://api.census.gov/data/2020/acs/acs5/variables.html. 
+
+Point2. (2022). “San Francisco Demographics.” Accessed from: https://www.point2homes.com/US/Neighborhood/CA/San-Francisco-Demographics.html. 
+
+Haider, Areeba & Justin Schweitzer. (2020). “The Poverty Line Matters, But It Isn’t Capturing Everyone It Should,” *Center for American Progress*. Accessed from: https://www.americanprogress.org/article/poverty-line-matters-isnt-capturing-everyone/. 
+
+The Council for Community and Economic Research (CCER). (2022). “Quarter 3, 2022 Cost of Living Index Released.” Accessed from: https://www.coli.org/16025-2/. 
+
+García-Mora, Fernando & Jorge Mora-Rivera. (2021). “Exploring the impacts of Internet access on poverty: A regional analysis of rural Mexico,” *New Media & Society*. DOI: 10.1177/1461444821100. 
+
+DataSF. (2022). “Police Department Incident Reports: 2018 to Present.” Accessed from: https://data.sfgov.org/Public-Safety/Police-Department-Incident-Reports-2018-to-Present/wg3w-h783. 
+
+Biagi, Bianca & Claudio Detotto. (2012). “Crime as Tourism Externality,” *Regional Studies*, 48(4): 693-709. DOI: 10.1080/00343404.2011.649005. 
+
+GIS Data Catalog. (2021). “Equity Priority Communities - Plan Bay Area 2050,” *MT GIS*. Accessed from: https://opendata.mtc.ca.gov/datasets/MTC::equity-priority-communities-plan-bay-area-2050/about. 
+
+DataSF. (2020). “Landmark Districts.” Accessed from: https://data.sfgov.org/Geographic-Locations-and-Boundaries/Landmark-Districts/vnrd-fpg7. 
+
+DataSF. (2019). “Coastal Zone Area.” Accessed from: https://data.sfgov.org/Geographic-Locations-and-Boundaries/Coastal-Zone-Area/v4ev-mbum. 
